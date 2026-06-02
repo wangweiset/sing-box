@@ -1,11 +1,10 @@
-
 name: Build Libbox xcframework
 
 on:
   workflow_dispatch:
     inputs:
       upstream_ref:
-        description: "sing-box 的 tag / branch / commit"
+        description: "sing-box 的 tag / branch / commit，例如 v1.11.0"
         required: true
         default: "v1.11.0"
       publish_release:
@@ -17,14 +16,17 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: macos-14
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
-      - name: Checkout sing-box
-        uses: actions/checkout@v4
+      - name: Checkout sing-box source
+        uses: actions/checkout@v5
         with:
           repository: SagerNet/sing-box
           ref: ${{ inputs.upstream_ref }}
@@ -33,29 +35,38 @@ jobs:
           submodules: recursive
 
       - name: Setup Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           go-version-file: sing-box/go.mod
           cache: true
           cache-dependency-path: sing-box/go.sum
 
-      - name: Show tool versions
+      - name: Show environment info
+        shell: bash
         run: |
+          set -euxo pipefail
+          sw_vers
           xcodebuild -version
           go version
-      
-      - name: Prepare gomobile (fallback)
+          pwd
+          ls -la
+
+      - name: Install gomobile
+        shell: bash
         run: |
+          set -euxo pipefail
           go install golang.org/x/mobile/cmd/gomobile@latest
           "$(go env GOPATH)/bin/gomobile" init
 
       - name: Build iOS framework
         working-directory: sing-box
+        shell: bash
         run: |
+          set -euxo pipefail
           make ios-framework
 
-      - name: Pack xcframework
-        id: pack
+      - name: Locate Libbox.xcframework
+        id: locate
         shell: bash
         run: |
           set -euo pipefail
@@ -63,41 +74,62 @@ jobs:
           FOUND="$(find "$GITHUB_WORKSPACE/sing-box" -type d -name 'Libbox.xcframework' -print -quit)"
 
           if [ -z "$FOUND" ]; then
-            echo "未找到 Libbox.xcframework"
-            echo "下面打印构建目录，方便排查："
-            find "$GITHUB_WORKSPACE/sing-box" -maxdepth 5 -type d | sed -n '1,200p'
+            echo "ERROR: 未找到 Libbox.xcframework"
+            echo "下面打印部分目录用于排查："
+            find "$GITHUB_WORKSPACE/sing-box" -maxdepth 6 | sed -n '1,300p'
             exit 1
           fi
 
-          OUT_DIR="$RUNNER_TEMP/out"
+          echo "FOUND_XCFRAMEWORK=$FOUND"
+          echo "xcframework_path=$FOUND" >> "$GITHUB_OUTPUT"
+
+      - name: Package xcframework
+        id: pack
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          SRC="${{ steps.locate.outputs.xcframework_path }}"
+          OUT_DIR="$RUNNER_TEMP/libbox-output"
           mkdir -p "$OUT_DIR"
-          cp -R "$FOUND" "$OUT_DIR/Libbox.xcframework"
+
+          cp -R "$SRC" "$OUT_DIR/Libbox.xcframework"
 
           ZIP_PATH="$RUNNER_TEMP/Libbox-${{ inputs.upstream_ref }}.xcframework.zip"
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
             "$OUT_DIR/Libbox.xcframework" \
             "$ZIP_PATH"
 
+          SHA256="$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')"
+          echo "$SHA256  $(basename "$ZIP_PATH")" > "$RUNNER_TEMP/Libbox-${{ inputs.upstream_ref }}.sha256.txt"
+
           echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
-          echo "xcframework_path=$OUT_DIR/Libbox.xcframework" >> "$GITHUB_OUTPUT"
+          echo "sha_path=$RUNNER_TEMP/Libbox-${{ inputs.upstream_ref }}.sha256.txt" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: Libbox-${{ inputs.upstream_ref }}-xcframework
-          path: ${{ steps.pack.outputs.zip_path }}
+          path: |
+            ${{ steps.pack.outputs.zip_path }}
+            ${{ steps.pack.outputs.sha_path }}
           retention-days: 7
 
       - name: Publish release
         if: ${{ inputs.publish_release }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ZIP_PATH: ${{ steps.pack.outputs.zip_path }}
           RELEASE_TAG: libbox-${{ inputs.upstream_ref }}
+          ZIP_PATH: ${{ steps.pack.outputs.zip_path }}
+          SHA_PATH: ${{ steps.pack.outputs.sha_path }}
+        shell: bash
         run: |
-          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
-          gh release create "$RELEASE_TAG" \
-            --title "Libbox ${{ inputs.upstream_ref }}" \
-            --notes "Built from SagerNet/sing-box @ ${{ inputs.upstream_ref }} by GitHub Actions."
+          set -euxo pipefail
 
-          gh release upload "$RELEASE_TAG" "$ZIP_PATH" --clobber
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" \
+              --title "Libbox ${{ inputs.upstream_ref }}" \
+              --notes "Built from SagerNet/sing-box @ ${{ inputs.upstream_ref }} by GitHub Actions."
+          fi
+
+          gh release upload "$RELEASE_TAG" "$ZIP_PATH" "$SHA_PATH" --clobber
