@@ -1,4 +1,4 @@
-name: Build Libbox xcframework
+name: Detect sing-box iOS build entry
 
 on:
   workflow_dispatch:
@@ -15,9 +15,9 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
+  detect:
     runs-on: macos-14
-    timeout-minutes: 120
+    timeout-minutes: 60
 
     steps:
       - name: Checkout sing-box source
@@ -43,176 +43,52 @@ jobs:
           sw_vers
           xcodebuild -version
           go version
-          pwd
-          ls -la
 
       - name: Detect build entry
-        id: detect
         working-directory: sing-box
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
 
-          echo "repo_dir=$PWD" >> "$GITHUB_OUTPUT"
+          echo "===== PWD ====="
+          pwd
 
-          echo "===== root files ====="
+          echo "===== ROOT FILES ====="
           ls -la
 
-          echo "===== build-related files ====="
-          find . -maxdepth 4 \
-            \( -name 'Makefile' -o -name '*.mk' -o -name '*.sh' -o -name '*.go' -o -name '*.yml' -o -name '*.yaml' \) \
-            | sort | sed -n '1,300p'
+          echo "===== TOP TREE ====="
+          find . -maxdepth 3 | sort | sed -n '1,400p'
 
-          echo "===== Makefile preview ====="
+          echo "===== BUILD RELATED FILES ====="
+          find . -maxdepth 5 \
+            \( -name 'Makefile' -o -name '*.mk' -o -name '*.sh' -o -name '*.go' -o -name '*.yml' -o -name '*.yaml' \) \
+            | sort | sed -n '1,400p'
+
+          echo "===== MAKEFILE PREVIEW ====="
           if [ -f Makefile ]; then
-            sed -n '1,240p' Makefile
+            sed -n '1,260p' Makefile
           else
             echo "No Makefile found in repo root"
           fi
 
-          echo "===== available make targets (filtered) ====="
+          echo "===== ALL MAKE TARGETS ====="
           if [ -f Makefile ]; then
             make -qp 2>/dev/null | \
               grep -E '^[A-Za-z0-9_.-]+:' | \
               cut -d: -f1 | \
-              sort -u | \
-              grep -Ei 'ios|apple|darwin|libbox|framework|mobile' || true
+              sort -u | sed -n '1,400p'
+          else
+            echo "No Makefile found"
           fi
 
-          echo "===== grep build keywords ====="
-          grep -RniE 'ios-framework|ios_framework|xcframework|gomobile|libbox|framework|mobile|darwin|apple' . \
+          echo "===== BUILD KEYWORD SEARCH ====="
+          grep -RniE 'ios-framework|ios_framework|xcframework|gomobile|libbox|framework|mobile|darwin|apple|build ios|build_ios' . \
             --include='Makefile' \
             --include='*.mk' \
             --include='*.sh' \
             --include='*.go' \
             --include='*.yml' \
-            --include='*.yaml' | head -300 || true
+            --include='*.yaml' | sed -n '1,400p' || true
 
-      - name: Attempt build
-        id: attempt
-        working-directory: sing-box
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          target_exists() {
-            local target="$1"
-            [ -f Makefile ] && make -qp 2>/dev/null | grep -qE "^${target}:"
-          }
-
-          try_make_target() {
-            local target="$1"
-            if target_exists "$target"; then
-              echo ">>> Trying: make ${target}"
-              make "${target}"
-              echo "build_entry=make ${target}" >> "$GITHUB_OUTPUT"
-              return 0
-            fi
-            return 1
-          }
-
-          try_script() {
-            local script="$1"
-            if [ -x "$script" ]; then
-              echo ">>> Trying executable script: ${script}"
-              "$script"
-              echo "build_entry=${script}" >> "$GITHUB_OUTPUT"
-              return 0
-            fi
-            if [ -f "$script" ]; then
-              echo ">>> Trying shell script: bash ${script}"
-              bash "$script"
-              echo "build_entry=bash ${script}" >> "$GITHUB_OUTPUT"
-              return 0
-            fi
-            return 1
-          }
-
-          try_make_target "ios-framework" && exit 0
-          try_make_target "ios_framework" && exit 0
-          try_make_target "ios" && exit 0
-          try_make_target "apple" && exit 0
-          try_make_target "libbox" && exit 0
-          try_make_target "mobile" && exit 0
-          try_make_target "framework" && exit 0
-
-          try_script "./scripts/build_ios.sh" && exit 0
-          try_script "./scripts/ios.sh" && exit 0
-          try_script "./scripts/build_apple.sh" && exit 0
-          try_script "./release/build_ios.sh" && exit 0
-          try_script "./build_ios.sh" && exit 0
-          try_script "./build_libbox.sh" && exit 0
-
-          echo "ERROR: No known build entry found."
-          echo "You should inspect the logs of 'Detect build entry'."
-          exit 1
-
-      - name: Locate Libbox.xcframework
-        id: locate
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          FOUND="$(find "$GITHUB_WORKSPACE/sing-box" -type d -name 'Libbox.xcframework' -print -quit)"
-
-          if [ -z "$FOUND" ]; then
-            echo "ERROR: 未找到 Libbox.xcframework"
-            echo "===== possible framework-like outputs ====="
-            find "$GITHUB_WORKSPACE/sing-box" \
-              \( -name '*.xcframework' -o -name '*.framework' \) \
-              | sed -n '1,300p' || true
-
-            echo "===== top directories ====="
-            find "$GITHUB_WORKSPACE/sing-box" -maxdepth 5 | sed -n '1,300p'
-            exit 1
-          fi
-
-          echo "FOUND_XCFRAMEWORK=$FOUND"
-          echo "xcframework_path=$FOUND" >> "$GITHUB_OUTPUT"
-
-      - name: Package xcframework
-        id: pack
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          REF_SAFE="$(echo '${{ inputs.upstream_ref }}' | tr '/:' '__')"
-          SRC="${{ steps.locate.outputs.xcframework_path }}"
-          OUT_DIR="$RUNNER_TEMP/libbox-output"
-          mkdir -p "$OUT_DIR"
-
-          cp -R "$SRC" "$OUT_DIR/Libbox.xcframework"
-
-          ZIP_PATH="$RUNNER_TEMP/Libbox-${REF_SAFE}.xcframework.zip"
-          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
-            "$OUT_DIR/Libbox.xcframework" \
-            "$ZIP_PATH"
-
-          SHA256="$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')"
-          SHA_PATH="$RUNNER_TEMP/Libbox-${REF_SAFE}.sha256.txt"
-          echo "$SHA256  $(basename "$ZIP_PATH")" > "$SHA_PATH"
-
-          echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
-          echo "sha_path=$SHA_PATH" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Libbox-${{ inputs.upstream_ref }}-xcframework
-          path: |
-            ${{ steps.pack.outputs.zip_path }}
-            ${{ steps.pack.outputs.sha_path }}
-          retention-days: 7
-
-      - name: Summary
-        shell: bash
-        run: |
-          {
-            echo "## Build Result"
-            echo ""
-            echo "- Upstream ref: \`${{ inputs.upstream_ref }}\`"
-            echo "- Build entry: \`${{ steps.attempt.outputs.build_entry }}\`"
-            echo "- XCFramework: \`${{ steps.locate.outputs.xcframework_path }}\`"
-            echo ""
-            echo "Artifact has been uploaded."
-          } >> "$GITHUB_STEP_SUMMARY"
+          echo "===== POSSIBLE APPLE/IOS FILES ====="
+          find . -maxdepth 6 | grep -Ei 'ios|apple|darwin|mobile|libbox|framework|release|script|build' | sed -n '1,400p' || true
