@@ -1,4 +1,4 @@
-name: Build Libbox xcframework iOS
+name: Build Libbox xcframework
 
 on:
   workflow_dispatch:
@@ -7,14 +7,9 @@ on:
         description: "sing-box 的 tag / branch / commit，例如 v1.11.0"
         required: true
         default: "v1.11.0"
-      publish_release:
-        description: "是否发布到当前仓库 Release"
-        required: true
-        type: boolean
-        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -51,12 +46,106 @@ jobs:
           pwd
           ls -la
 
-      - name: Build iOS framework
+      - name: Detect build entry
+        id: detect
+        working-directory: sing-box
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "repo_dir=$PWD" >> "$GITHUB_OUTPUT"
+
+          echo "===== root files ====="
+          ls -la
+
+          echo "===== build-related files ====="
+          find . -maxdepth 4 \
+            \( -name 'Makefile' -o -name '*.mk' -o -name '*.sh' -o -name '*.go' -o -name '*.yml' -o -name '*.yaml' \) \
+            | sort | sed -n '1,300p'
+
+          echo "===== Makefile preview ====="
+          if [ -f Makefile ]; then
+            sed -n '1,240p' Makefile
+          else
+            echo "No Makefile found in repo root"
+          fi
+
+          echo "===== available make targets (filtered) ====="
+          if [ -f Makefile ]; then
+            make -qp 2>/dev/null | \
+              grep -E '^[A-Za-z0-9_.-]+:' | \
+              cut -d: -f1 | \
+              sort -u | \
+              grep -Ei 'ios|apple|darwin|libbox|framework|mobile' || true
+          fi
+
+          echo "===== grep build keywords ====="
+          grep -RniE 'ios-framework|ios_framework|xcframework|gomobile|libbox|framework|mobile|darwin|apple' . \
+            --include='Makefile' \
+            --include='*.mk' \
+            --include='*.sh' \
+            --include='*.go' \
+            --include='*.yml' \
+            --include='*.yaml' | head -300 || true
+
+      - name: Attempt build
+        id: attempt
         working-directory: sing-box
         shell: bash
         run: |
           set -euxo pipefail
-          make ios-framework
+
+          target_exists() {
+            local target="$1"
+            [ -f Makefile ] && make -qp 2>/dev/null | grep -qE "^${target}:"
+          }
+
+          try_make_target() {
+            local target="$1"
+            if target_exists "$target"; then
+              echo ">>> Trying: make ${target}"
+              make "${target}"
+              echo "build_entry=make ${target}" >> "$GITHUB_OUTPUT"
+              return 0
+            fi
+            return 1
+          }
+
+          try_script() {
+            local script="$1"
+            if [ -x "$script" ]; then
+              echo ">>> Trying executable script: ${script}"
+              "$script"
+              echo "build_entry=${script}" >> "$GITHUB_OUTPUT"
+              return 0
+            fi
+            if [ -f "$script" ]; then
+              echo ">>> Trying shell script: bash ${script}"
+              bash "$script"
+              echo "build_entry=bash ${script}" >> "$GITHUB_OUTPUT"
+              return 0
+            fi
+            return 1
+          }
+
+          try_make_target "ios-framework" && exit 0
+          try_make_target "ios_framework" && exit 0
+          try_make_target "ios" && exit 0
+          try_make_target "apple" && exit 0
+          try_make_target "libbox" && exit 0
+          try_make_target "mobile" && exit 0
+          try_make_target "framework" && exit 0
+
+          try_script "./scripts/build_ios.sh" && exit 0
+          try_script "./scripts/ios.sh" && exit 0
+          try_script "./scripts/build_apple.sh" && exit 0
+          try_script "./release/build_ios.sh" && exit 0
+          try_script "./build_ios.sh" && exit 0
+          try_script "./build_libbox.sh" && exit 0
+
+          echo "ERROR: No known build entry found."
+          echo "You should inspect the logs of 'Detect build entry'."
+          exit 1
 
       - name: Locate Libbox.xcframework
         id: locate
@@ -68,8 +157,13 @@ jobs:
 
           if [ -z "$FOUND" ]; then
             echo "ERROR: 未找到 Libbox.xcframework"
-            echo "下面打印部分目录用于排查："
-            find "$GITHUB_WORKSPACE/sing-box" -maxdepth 6 | sed -n '1,300p'
+            echo "===== possible framework-like outputs ====="
+            find "$GITHUB_WORKSPACE/sing-box" \
+              \( -name '*.xcframework' -o -name '*.framework' \) \
+              | sed -n '1,300p' || true
+
+            echo "===== top directories ====="
+            find "$GITHUB_WORKSPACE/sing-box" -maxdepth 5 | sed -n '1,300p'
             exit 1
           fi
 
@@ -82,22 +176,24 @@ jobs:
         run: |
           set -euxo pipefail
 
+          REF_SAFE="$(echo '${{ inputs.upstream_ref }}' | tr '/:' '__')"
           SRC="${{ steps.locate.outputs.xcframework_path }}"
           OUT_DIR="$RUNNER_TEMP/libbox-output"
           mkdir -p "$OUT_DIR"
 
           cp -R "$SRC" "$OUT_DIR/Libbox.xcframework"
 
-          ZIP_PATH="$RUNNER_TEMP/Libbox-${{ inputs.upstream_ref }}.xcframework.zip"
+          ZIP_PATH="$RUNNER_TEMP/Libbox-${REF_SAFE}.xcframework.zip"
           /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
             "$OUT_DIR/Libbox.xcframework" \
             "$ZIP_PATH"
 
           SHA256="$(shasum -a 256 "$ZIP_PATH" | awk '{print $1}')"
-          echo "$SHA256  $(basename "$ZIP_PATH")" > "$RUNNER_TEMP/Libbox-${{ inputs.upstream_ref }}.sha256.txt"
+          SHA_PATH="$RUNNER_TEMP/Libbox-${REF_SAFE}.sha256.txt"
+          echo "$SHA256  $(basename "$ZIP_PATH")" > "$SHA_PATH"
 
           echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
-          echo "sha_path=$RUNNER_TEMP/Libbox-${{ inputs.upstream_ref }}.sha256.txt" >> "$GITHUB_OUTPUT"
+          echo "sha_path=$SHA_PATH" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -108,21 +204,15 @@ jobs:
             ${{ steps.pack.outputs.sha_path }}
           retention-days: 7
 
-      - name: Publish release
-        if: ${{ inputs.publish_release }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: libbox-${{ inputs.upstream_ref }}
-          ZIP_PATH: ${{ steps.pack.outputs.zip_path }}
-          SHA_PATH: ${{ steps.pack.outputs.sha_path }}
+      - name: Summary
         shell: bash
         run: |
-          set -euxo pipefail
-
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" \
-              --title "Libbox ${{ inputs.upstream_ref }}" \
-              --notes "Built from SagerNet/sing-box @ ${{ inputs.upstream_ref }} by GitHub Actions."
-          fi
-
-          gh release upload "$RELEASE_TAG" "$ZIP_PATH" "$SHA_PATH" --clobber
+          {
+            echo "## Build Result"
+            echo ""
+            echo "- Upstream ref: \`${{ inputs.upstream_ref }}\`"
+            echo "- Build entry: \`${{ steps.attempt.outputs.build_entry }}\`"
+            echo "- XCFramework: \`${{ steps.locate.outputs.xcframework_path }}\`"
+            echo ""
+            echo "Artifact has been uploaded."
+          } >> "$GITHUB_STEP_SUMMARY"
