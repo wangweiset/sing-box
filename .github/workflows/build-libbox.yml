@@ -1,3 +1,4 @@
+
 name: Build Libbox xcframework
 
 on:
@@ -42,6 +43,11 @@ jobs:
         run: |
           xcodebuild -version
           go version
+      
+      - name: Prepare gomobile (fallback)
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          "$(go env GOPATH)/bin/gomobile" init
 
       - name: Build iOS framework
         working-directory: sing-box
