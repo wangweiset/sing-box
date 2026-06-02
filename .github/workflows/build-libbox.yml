@@ -1,0 +1,97 @@
+name: Build Libbox xcframework
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "sing-box 的 tag / branch / commit"
+        required: true
+        default: "v1.11.0"
+      publish_release:
+        description: "是否发布到当前仓库 Release"
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout sing-box
+        uses: actions/checkout@v4
+        with:
+          repository: SagerNet/sing-box
+          ref: ${{ inputs.upstream_ref }}
+          path: sing-box
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: sing-box/go.mod
+          cache: true
+          cache-dependency-path: sing-box/go.sum
+
+      - name: Show tool versions
+        run: |
+          xcodebuild -version
+          go version
+
+      - name: Build iOS framework
+        working-directory: sing-box
+        run: |
+          make ios-framework
+
+      - name: Pack xcframework
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          FOUND="$(find "$GITHUB_WORKSPACE/sing-box" -type d -name 'Libbox.xcframework' -print -quit)"
+
+          if [ -z "$FOUND" ]; then
+            echo "未找到 Libbox.xcframework"
+            echo "下面打印构建目录，方便排查："
+            find "$GITHUB_WORKSPACE/sing-box" -maxdepth 5 -type d | sed -n '1,200p'
+            exit 1
+          fi
+
+          OUT_DIR="$RUNNER_TEMP/out"
+          mkdir -p "$OUT_DIR"
+          cp -R "$FOUND" "$OUT_DIR/Libbox.xcframework"
+
+          ZIP_PATH="$RUNNER_TEMP/Libbox-${{ inputs.upstream_ref }}.xcframework.zip"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent \
+            "$OUT_DIR/Libbox.xcframework" \
+            "$ZIP_PATH"
+
+          echo "zip_path=$ZIP_PATH" >> "$GITHUB_OUTPUT"
+          echo "xcframework_path=$OUT_DIR/Libbox.xcframework" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Libbox-${{ inputs.upstream_ref }}-xcframework
+          path: ${{ steps.pack.outputs.zip_path }}
+          retention-days: 7
+
+      - name: Publish release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ZIP_PATH: ${{ steps.pack.outputs.zip_path }}
+          RELEASE_TAG: libbox-${{ inputs.upstream_ref }}
+        run: |
+          gh release view "$RELEASE_TAG" >/dev/null 2>&1 || \
+          gh release create "$RELEASE_TAG" \
+            --title "Libbox ${{ inputs.upstream_ref }}" \
+            --notes "Built from SagerNet/sing-box @ ${{ inputs.upstream_ref }} by GitHub Actions."
+
+          gh release upload "$RELEASE_TAG" "$ZIP_PATH" --clobber
