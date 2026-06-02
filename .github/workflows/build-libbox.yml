@@ -1,4 +1,4 @@
-name: Build Libbox xcframework
+name: Build Libbox xcframework iOS
 
 on:
   workflow_dispatch:
@@ -50,13 +50,6 @@ jobs:
           go version
           pwd
           ls -la
-
-      - name: Install gomobile
-        shell: bash
-        run: |
-          set -euxo pipefail
-          go install golang.org/x/mobile/cmd/gomobile@latest
-          "$(go env GOPATH)/bin/gomobile" init
 
       - name: Build iOS framework
         working-directory: sing-box
